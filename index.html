@@ -1615,13 +1615,14 @@ breathClose.addEventListener('click', stopBreath);
 breathAgainBtn.addEventListener('click', startBreath);   // нова вправа з вступу, крапки знову "наступні"
 
 /* ---------------------------------------------
-   МОДЕЛЬ ФІЗИКИ НИТОК: 'legacy' (за замовчуванням) або 'verlet' (?physics=verlet в адресі)
+   МОДЕЛЬ ФІЗИКИ НИТОК: 'verlet' (за замовчуванням) або 'legacy' (?physics=legacy в адресі — запасний варіант)
    'legacy' — rope-follow по зміщеннях segOffsets (код вище/нижче, без змін).
    'verlet' — ланцюжок вільних точок (x,y) зі збереженням довжини, гравітацією й
    низьким гасінням: нитка гойдається як маятник. ЕТАП A: ядро + idle-вітер;
-   ЕТАП B: сила руки; ЕТАП C: ворота по швидкості руки й щипок пальцем. Звук і дихання на нитки в цьому режимі ще НЕ діють.
+   ЕТАП B: сила руки; ЕТАП C: ворота по швидкості руки й щипок пальцем; ЕТАП D: звук мушель і нахил;
+   ЕТАП E: дихальна вправа (кінематичний оверлей).
 ---------------------------------------------- */
-const PHYSICS_MODEL = new URLSearchParams(location.search).get('physics') === 'verlet' ? 'verlet' : 'legacy';
+const PHYSICS_MODEL = new URLSearchParams(location.search).get('physics') === 'legacy' ? 'legacy' : 'verlet';
 
 const VERLET_SEGMENTS = 8;        // сегментів на нитку (точок на 1 більше: точка 0 — кріплення)
 const VERLET_STEP = 1/60;         // фіксований крок симуляції, с — не залежить від fps екрана
