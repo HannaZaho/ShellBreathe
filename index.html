@@ -2625,6 +2625,19 @@ function loop(now){
 // знову вантажиться й викликається, cheekPuff знову штовхає кораблик.
 const ENABLE_FACE_LANDMARKER = false;
 
+// --- ПОРОГИ РОЗПІЗНАВАННЯ РУКИ (HandLandmarker) і захист від хибних спрацювань ---
+// Вищі пороги = модель рідше "бачить" руку в губах чи обличчі, але руку треба тримати чіткіше.
+const HAND_MAX_NUM = 1;                      // скільки рук шукаємо в кадрі
+const HAND_MIN_DETECTION_CONFIDENCE = 0.7;   // мін. впевненість, що в кадрі взагалі є рука (дефолт MediaPipe 0.5)
+const HAND_MIN_PRESENCE_CONFIDENCE = 0.7;    // мін. впевненість, що рука досі присутня між кадрами (дефолт 0.5)
+const HAND_MIN_TRACKING_CONFIDENCE = 0.7;    // мін. впевненість стеження за рукою від кадру до кадру (дефолт 0.5)
+const HAND_MIN_HANDEDNESS_SCORE = 0.7;       // руки з handedness.score нижче цього значення ігноруємо (якщо MediaPipe його повертає)
+// Одиничні хибні кадри (на кадрі камери ~30/с): рука вважається "в кадрі" лише після HAND_PRESENT_FRAMES_ON
+// поспіль кадрів з розпізнаванням і зникає лише після HAND_PRESENT_FRAMES_OFF поспіль кадрів без нього.
+// Рахуються саме НОВІ кадри камери (а не кадри екрана); коротка перерва (до OFF-1 кадрів) руку не губить.
+const HAND_PRESENT_FRAMES_ON = 3;
+const HAND_PRESENT_FRAMES_OFF = 5;
+
 let handLandmarker = null;
 let faceLandmarker = null;
 let running = false;
@@ -2641,12 +2654,12 @@ async function initMediaPipe(){
         delegate: "GPU"
       },
       runningMode: "VIDEO",
-      numHands: 1,
+      numHands: HAND_MAX_NUM,
       // підвищені пороги впевненості (замість дефолтних 0.5) — прибирають
       // false-positive, коли модель "бачить" руку в деталях обличчя (губи/ніс)
-      minHandDetectionConfidence: 0.7,
-      minHandPresenceConfidence: 0.7,
-      minTrackingConfidence: 0.7
+      minHandDetectionConfidence: HAND_MIN_DETECTION_CONFIDENCE,
+      minHandPresenceConfidence: HAND_MIN_PRESENCE_CONFIDENCE,
+      minTrackingConfidence: HAND_MIN_TRACKING_CONFIDENCE
     });
   } catch(gpuErr){
     console.warn('GPU delegate не спрацював, пробую CPU:', gpuErr);
@@ -2656,10 +2669,10 @@ async function initMediaPipe(){
         delegate: "CPU"
       },
       runningMode: "VIDEO",
-      numHands: 1,
-      minHandDetectionConfidence: 0.7,
-      minHandPresenceConfidence: 0.7,
-      minTrackingConfidence: 0.7
+      numHands: HAND_MAX_NUM,
+      minHandDetectionConfidence: HAND_MIN_DETECTION_CONFIDENCE,
+      minHandPresenceConfidence: HAND_MIN_PRESENCE_CONFIDENCE,
+      minTrackingConfidence: HAND_MIN_TRACKING_CONFIDENCE
     });
   }
 
@@ -2755,14 +2768,35 @@ async function startCamera(){
 // Камера дає ~30 кадрів/с, а detectLoop крутиться з частотою екрана (60+): без цього той самий
 // кадр розпізнавався двічі, швидкість руки смикалась між 2v і 0, ворота на 60 fps відкривались
 // ширше, ніж на 30 fps, а розпізнавання коштувало вдвічі більше. legacy — без змін (прапорець вимкнений).
-let videoFrameTracking = false;   // чи працює відстеження нових кадрів (verlet + підтримка браузера)
+let videoFrameCounting = false;   // чи доступний лічильник кадрів камери (requestVideoFrameCallback є в браузері)
+let videoFrameTracking = false;   // чи пропускаємо дублікати кадрів при розпізнаванні (лише verlet)
 let videoFrameCounter = 0;        // скільки нових кадрів камери вже показано
 let lastDetectedVideoFrame = -1;  // номер кадру, на якому востаннє розпізнавали руку
+let lastCountedVideoFrame = -1;   // номер кадру, що вже врахований у лічильниках "в кадрі / нема" (HAND_PRESENT_FRAMES_*)
 function startVideoFrameTracking(){
-  if(PHYSICS_MODEL !== 'verlet' || !('requestVideoFrameCallback' in video)) return;
-  videoFrameTracking = true;
+  if(!('requestVideoFrameCallback' in video)) return;
+  videoFrameCounting = true;      // лічильник потрібен обом режимам: за ним рахуються кадри для HAND_PRESENT_FRAMES_*
+  videoFrameTracking = PHYSICS_MODEL === 'verlet';
   const onFrame = () => { videoFrameCounter++; video.requestVideoFrameCallback(onFrame); };
   video.requestVideoFrameCallback(onFrame);
+}
+
+// стан захисту від хибних кадрів руки
+let handOnStreak = 0, handOffStreak = 0;   // скільки нових кадрів камери поспіль є / нема розпізнавання
+let handConfirmed = false;                 // чи рука вважається "в кадрі" (після ON поспіль кадрів, до OFF поспіль без неї)
+let lastRawHandLm = null;                  // останні точки руки — тримаємо превʼю в межах короткої перерви
+// вибір руки з результату MediaPipe: перша з handedness.score >= HAND_MIN_HANDEDNESS_SCORE;
+// якщо score не повертається — приймаємо (поріг не застосовується)
+function pickHand(result){
+  const lms = result.landmarks;
+  if(!lms || lms.length === 0) return null;
+  const hd = result.handedness || result.handednesses;   // назва поля різна у версіях бібліотеки
+  for(let i=0;i<lms.length;i++){
+    const cat = hd && hd[i] && hd[i][0];
+    const score = cat && typeof cat.score === 'number' ? cat.score : 1;
+    if(score >= HAND_MIN_HANDEDNESS_SCORE) return lms[i];
+  }
+  return null;
 }
 
 function detectLoop(){
@@ -2775,9 +2809,19 @@ function detectLoop(){
     const result = handLandmarker.detectForVideo(video, now);
     if(FPS_DEBUG) fpsAdd('hand', performance.now() - tHand);
     let rawHandLm = null;
-    if(result.landmarks && result.landmarks.length > 0){
-      const lm = result.landmarks[0];
+    // захист від одиничних хибних кадрів: рахуємо лише НОВІ кадри камери (на дублікатах лічильники стоять)
+    const lmPicked = pickHand(result);
+    const newCamFrame = !videoFrameCounting || videoFrameCounter !== lastCountedVideoFrame;
+    if(newCamFrame){
+      lastCountedVideoFrame = videoFrameCounter;
+      if(lmPicked){ handOnStreak++; handOffStreak = 0; } else { handOffStreak++; handOnStreak = 0; }
+      if(!handConfirmed && handOnStreak >= HAND_PRESENT_FRAMES_ON) handConfirmed = true;
+      else if(handConfirmed && handOffStreak >= HAND_PRESENT_FRAMES_OFF) handConfirmed = false;
+    }
+    if(lmPicked && handConfirmed){
+      const lm = lmPicked;
       rawHandLm = lm; // для точок на превʼю — без дзеркалення й без масштабу W/H
+      lastRawHandLm = lm;
       // центр долоні: середнє кількох базових точок
       const idxs = [0,5,9,13,17];
       let sx=0, sy=0;
@@ -2825,7 +2869,12 @@ function detectLoop(){
         }
       }
       prevFingerPoints = fingerPoints;
+    } else if(handConfirmed){
+      // коротка перерва розпізнавання (менше HAND_PRESENT_FRAMES_OFF кадрів): тримаємо останній стан руки,
+      // нічого не оновлюємо — рука не "блимає" і швидкість не стрибає
+      rawHandLm = lastRawHandLm;
     } else {
+      // рука ще не підтверджена (менше HAND_PRESENT_FRAMES_ON кадрів поспіль) або вже втрачена
       handPresent = false;
       prevHandX = null; prevHandY = null;
       prevFingerPoints = null;
@@ -2833,6 +2882,13 @@ function detectLoop(){
       for(let f=0; f<5; f++){ fingerSmVx[f] = 0; fingerSmVy[f] = 0; }
       fingerPoints = [];
       statusEl.textContent = 'hand not in frame';
+      if(lmPicked){
+        // але позицію запамʼятовуємо вже зараз, щоб у перший підтверджений кадр була швидкість
+        const lmp = lmPicked; let sx=0, sy=0;
+        for(const i of [0,5,9,13,17]){ sx += lmp[i].x; sy += lmp[i].y; }
+        prevHandX = (1 - sx/5) * W; prevHandY = (sy/5) * H; prevHandT = now;
+        prevFingerPoints = [4,8,12,16,20].map(i => ({ x: (1 - lmp[i].x) * W, y: lmp[i].y * H }));
+      } else lastRawHandLm = null;
     }
 
     // друга модель — обличчя: сигнал "дмухання" (cheekPuff) + самі точки
