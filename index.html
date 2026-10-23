@@ -789,8 +789,14 @@ function loadImage(url){
 // це суттєво дешевше для продуктивності при великій кількості ниток.
 // filterStr параметризовано, щоб той самий принцип можна було застосувати
 // й до гілки (stickImg) зі своїм, окремим набором значень
+// BAKE_FILTERS_ENABLED = false: фільтри кольору (рядки filterStr) НЕ застосовуються — функція повертає
+// зображення без змін. Причина: Safari та всі iOS-браузери не підтримують ctx.filter і мовчки показують
+// оригінальні кольори (затверджений теплий вигляд), а Chrome застосовував фільтри й виглядав вицвілим.
+// Усі filterStr лишаються в коді; щоб повернути фільтри (де ctx.filter підтримується) — постав true
+const BAKE_FILTERS_ENABLED = false;
 function bakeFilter(img, filterStr = 'contrast(0.62) brightness(1.00) saturate(0.38) sepia(0.22)'){
   if(!img) return null;
+  if(!BAKE_FILTERS_ENABLED) return img;
   const off = document.createElement('canvas');
   off.width = img.naturalWidth;
   off.height = img.naturalHeight;
